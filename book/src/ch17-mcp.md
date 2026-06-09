@@ -167,6 +167,8 @@ The manager owns server lifecycle:
 | `disconnect_server(id)`                | Close the connection, drop tools from the federated catalog, emit `ServerDisconnected`                                                  |
 | `subscribe_catalog_events()`           | Broadcast receiver for `McpCatalogEvent` (server connect / disconnect / tool added / removed / changed / refresh failed / auth changed) |
 
+Register a server with `with_server_options(config, McpServerOptions::new().with_timeout(duration))` to bound discovery for that server. The timeout applies to initial discovery and refresh discovery, and failures surface as `McpError::Timeout`.
+
 ## Federating MCP into the agent
 
 `McpServerManager::source()` returns a sized `CatalogReader` that the agent can take ownership of through `add_tool_source`. Connect, disconnect, and catalog refresh events feed straight into the loop — every `next()` re-snapshots the source and emits `AgentEvent::ToolCatalogChanged` before invoking the model again, so the model sees the current tool list every turn:

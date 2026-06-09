@@ -8,6 +8,7 @@
 //! agentkit ↔ rmcp ↔ HTTP path can be exercised end-to-end.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rmcp::{
     RoleServer, ServerHandler,
@@ -27,6 +28,7 @@ use tokio::{sync::oneshot, task::JoinHandle};
 #[derive(Clone)]
 pub struct MutableMcpServer {
     tools: Arc<Mutex<Vec<Tool>>>,
+    list_tools_delay: Arc<Mutex<Option<Duration>>>,
     peer_slot: Arc<Mutex<Option<Peer<RoleServer>>>>,
     /// Records every `call_tool` invocation as `(name, json_arguments)`.
     pub call_log: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
@@ -36,6 +38,7 @@ impl MutableMcpServer {
     fn new(initial_tools: Vec<Tool>) -> Self {
         Self {
             tools: Arc::new(Mutex::new(initial_tools)),
+            list_tools_delay: Arc::new(Mutex::new(None)),
             peer_slot: Arc::new(Mutex::new(None)),
             call_log: Arc::new(Mutex::new(Vec::new())),
         }
@@ -58,6 +61,10 @@ impl ServerHandler for MutableMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, RmcpError> {
+        let delay = *self.list_tools_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let tools = self.tools.lock().unwrap().clone();
         Ok(ListToolsResult {
             tools,
@@ -124,6 +131,12 @@ impl HttpServerHandle {
     /// client to learn about the change.
     pub fn set_tools(&self, tools: Vec<Tool>) {
         *self.server.tools.lock().unwrap() = tools;
+    }
+
+    /// Delays every `tools/list` response by `delay`. Useful for exercising
+    /// client-side discovery timeout behavior.
+    pub fn set_list_tools_delay(&self, delay: Option<Duration>) {
+        *self.server.list_tools_delay.lock().unwrap() = delay;
     }
 
     /// Appends a tool to the served list.

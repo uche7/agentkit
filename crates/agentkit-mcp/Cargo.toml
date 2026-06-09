@@ -25,7 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 sse-stream = "0.2"
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
 axum = "0.8"

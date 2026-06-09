@@ -67,6 +67,8 @@ println!("connected {} MCP server(s)", handles.len());
 
 Use `connect_all_settled().await` when startup should be best effort: it attempts every registered server concurrently, installs successful connections into the manager, and returns each failed server with its own `McpError`.
 
+For slow discovery, register a server with `with_server_options(config, McpServerOptions::new().with_timeout(duration))`. If `tools/list`, `resources/list`, or `prompts/list` exceeds the timeout during initial discovery or refresh, the manager returns `McpError::Timeout`.
+
 ## Discovering tools
 
 After connecting, each server's capabilities are available through its discovery snapshot. The `tools`/`resources`/`prompts` fields hold the raw rmcp types — pattern-match on them directly for `output_schema`, `annotations`, `mime_type`, and friends.

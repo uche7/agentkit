@@ -16,7 +16,9 @@ use agentkit_integration_tests::snapshot::{
     SessionRecording, SnapshotAdapter, assert_recording, snapshot_path,
 };
 use agentkit_loop::{Agent, LoopInterrupt, LoopStep, SessionConfig};
-use agentkit_mcp::{McpCatalogEvent, McpServerConfig, McpServerId, McpServerManager};
+use agentkit_mcp::{
+    McpCatalogEvent, McpError, McpServerConfig, McpServerId, McpServerManager, McpServerOptions,
+};
 use agentkit_tools_core::ToolSource;
 use tokio::net::TcpListener;
 
@@ -143,6 +145,49 @@ async fn connect_all_settled_keeps_successes_and_reports_each_failure() {
     );
     assert!(manager.connected_server(&McpServerId::new("bad")).is_none());
     assert_tool_names(&source, &["mcp_alpha_only_alpha", "mcp_beta_only_beta"]);
+}
+
+#[tokio::test]
+async fn connect_all_settled_times_out_slow_discovery_per_server() {
+    let fast = spawn_http_mcp(vec![simple_tool("fast_tool", "Fast tool.")]).await;
+    let slow = spawn_http_mcp(vec![simple_tool("slow_tool", "Slow tool.")]).await;
+    slow.set_list_tools_delay(Some(Duration::from_millis(250)));
+
+    let mut manager = McpServerManager::new()
+        .with_server(McpServerConfig::streamable_http("fast", &fast.url))
+        .with_server_options(
+            McpServerConfig::streamable_http("slow", &slow.url),
+            McpServerOptions::new().with_timeout(Duration::from_millis(25)),
+        );
+    let source = manager.source();
+
+    let settled = manager.connect_all_settled().await;
+
+    assert_eq!(settled.connected().len(), 1);
+    assert_eq!(
+        settled.connected()[0].server_id(),
+        &McpServerId::new("fast")
+    );
+    assert_eq!(settled.failed().len(), 1);
+    assert_eq!(settled.failed()[0].server_id, McpServerId::new("slow"));
+    assert!(matches!(
+        settled.failed()[0].error,
+        McpError::Timeout {
+            operation: "discover",
+            ..
+        }
+    ));
+    assert!(
+        manager
+            .connected_server(&McpServerId::new("fast"))
+            .is_some()
+    );
+    assert!(
+        manager
+            .connected_server(&McpServerId::new("slow"))
+            .is_none()
+    );
+    assert_tool_names(&source, &["mcp_fast_fast_tool"]);
 }
 
 #[tokio::test]

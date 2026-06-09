@@ -22,6 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use agentkit_capabilities::{
     CapabilityContext, CapabilityError, CapabilityProvider, Invocable, PromptContents,
@@ -2180,9 +2181,31 @@ impl fmt::Debug for McpConnectAllSettled {
     }
 }
 
+/// Per-server lifecycle options used by [`McpServerManager`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct McpServerOptions {
+    /// Maximum time allowed for initial or refresh discovery
+    /// (`tools/list`, `resources/list`, and `prompts/list`).
+    pub discovery_timeout: Option<Duration>,
+}
+
+impl McpServerOptions {
+    /// Creates default server options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the discovery timeout.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.discovery_timeout = Some(timeout);
+        self
+    }
+}
+
 /// Manages the lifecycle of one or more MCP servers.
 pub struct McpServerManager {
     configs: BTreeMap<McpServerId, McpServerConfig>,
+    options: BTreeMap<McpServerId, McpServerOptions>,
     connections: BTreeMap<McpServerId, McpServerHandle>,
     auth: BTreeMap<McpServerId, MetadataMap>,
     catalog_tx: broadcast::Sender<McpCatalogEvent>,
@@ -2202,6 +2225,7 @@ impl Default for McpServerManager {
         let (catalog_writer, _) = dynamic_catalog("mcp");
         Self {
             configs: BTreeMap::new(),
+            options: BTreeMap::new(),
             connections: BTreeMap::new(),
             auth: BTreeMap::new(),
             catalog_tx,
@@ -2260,9 +2284,35 @@ impl McpServerManager {
         self
     }
 
+    /// Registers a server configuration with lifecycle options. Returns
+    /// `self` for chaining.
+    pub fn with_server_options(
+        mut self,
+        config: McpServerConfig,
+        options: McpServerOptions,
+    ) -> Self {
+        self.register_server_with_options(config, options);
+        self
+    }
+
     /// Registers a server configuration by mutable reference.
     pub fn register_server(&mut self, config: McpServerConfig) -> &mut Self {
-        self.configs.insert(config.id.clone(), config);
+        let id = config.id.clone();
+        self.configs.insert(id.clone(), config);
+        self.options.entry(id).or_default();
+        self
+    }
+
+    /// Registers a server configuration and lifecycle options by mutable
+    /// reference.
+    pub fn register_server_with_options(
+        &mut self,
+        config: McpServerConfig,
+        options: McpServerOptions,
+    ) -> &mut Self {
+        let id = config.id.clone();
+        self.configs.insert(id.clone(), config);
+        self.options.insert(id, options);
         self
     }
 
@@ -2285,6 +2335,21 @@ impl McpServerManager {
         let _ = self.catalog_tx.send(event);
     }
 
+    async fn discover_with_options(
+        connection: &McpConnection,
+        options: &McpServerOptions,
+    ) -> Result<McpDiscoverySnapshot, McpError> {
+        match options.discovery_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, connection.discover())
+                .await
+                .map_err(|_| McpError::Timeout {
+                    operation: "discover",
+                    duration: timeout,
+                })?,
+            None => connection.discover().await,
+        }
+    }
+
     /// Connects a single registered server by its identifier.
     pub async fn connect_server(
         &mut self,
@@ -2295,6 +2360,7 @@ impl McpServerManager {
             .get(server_id)
             .cloned()
             .ok_or_else(|| McpError::UnknownServer(server_id.to_string()))?;
+        let options = self.options.get(server_id).cloned().unwrap_or_default();
         let connection = Arc::new(
             McpConnection::connect_with_auth(
                 &config,
@@ -2303,7 +2369,7 @@ impl McpServerManager {
             )
             .await?,
         );
-        let snapshot = connection.discover().await?;
+        let snapshot = Self::discover_with_options(&connection, &options).await?;
         let handle = McpServerHandle {
             config,
             connection,
@@ -2320,15 +2386,27 @@ impl McpServerManager {
 
     /// Connects all registered servers concurrently.
     pub async fn connect_all(&mut self) -> Result<Vec<McpServerHandle>, McpError> {
-        let plans: Vec<(McpServerId, McpServerConfig, Option<MetadataMap>)> = self
+        let plans: Vec<(
+            McpServerId,
+            McpServerConfig,
+            McpServerOptions,
+            Option<MetadataMap>,
+        )> = self
             .configs
             .iter()
-            .map(|(id, cfg)| (id.clone(), cfg.clone(), self.auth.get(id).cloned()))
+            .map(|(id, cfg)| {
+                (
+                    id.clone(),
+                    cfg.clone(),
+                    self.options.get(id).cloned().unwrap_or_default(),
+                    self.auth.get(id).cloned(),
+                )
+            })
             .collect();
         let handler_config = self.handler_config.clone();
         let namespace = self.namespace.clone();
 
-        let futures = plans.into_iter().map(|(server_id, config, auth)| {
+        let futures = plans.into_iter().map(|(server_id, config, options, auth)| {
             let handler_config = handler_config.clone();
             let namespace = namespace.clone();
             async move {
@@ -2336,7 +2414,7 @@ impl McpServerManager {
                     McpConnection::connect_with_auth(&config, auth.as_ref(), handler_config)
                         .await?,
                 );
-                let snapshot = connection.discover().await?;
+                let snapshot = Self::discover_with_options(&connection, &options).await?;
                 Ok::<(McpServerId, McpServerHandle), McpError>((
                     server_id,
                     McpServerHandle {
@@ -2375,15 +2453,27 @@ impl McpServerManager {
     /// into the manager and tool catalog, while each failed connection is
     /// returned with its [`McpServerId`] and [`McpError`].
     pub async fn connect_all_settled(&mut self) -> McpConnectAllSettled {
-        let plans: Vec<(McpServerId, McpServerConfig, Option<MetadataMap>)> = self
+        let plans: Vec<(
+            McpServerId,
+            McpServerConfig,
+            McpServerOptions,
+            Option<MetadataMap>,
+        )> = self
             .configs
             .iter()
-            .map(|(id, cfg)| (id.clone(), cfg.clone(), self.auth.get(id).cloned()))
+            .map(|(id, cfg)| {
+                (
+                    id.clone(),
+                    cfg.clone(),
+                    self.options.get(id).cloned().unwrap_or_default(),
+                    self.auth.get(id).cloned(),
+                )
+            })
             .collect();
         let handler_config = self.handler_config.clone();
         let namespace = self.namespace.clone();
 
-        let futures = plans.into_iter().map(|(server_id, config, auth)| {
+        let futures = plans.into_iter().map(|(server_id, config, options, auth)| {
             let handler_config = handler_config.clone();
             let namespace = namespace.clone();
             async move {
@@ -2392,7 +2482,7 @@ impl McpServerManager {
                         McpConnection::connect_with_auth(&config, auth.as_ref(), handler_config)
                             .await?,
                     );
-                    let snapshot = connection.discover().await?;
+                    let snapshot = Self::discover_with_options(&connection, &options).await?;
                     Ok::<McpServerHandle, McpError>(McpServerHandle {
                         config,
                         connection,
@@ -2445,8 +2535,9 @@ impl McpServerManager {
             .connections
             .get_mut(server_id)
             .ok_or_else(|| McpError::UnknownServer(server_id.to_string()))?;
+        let options = self.options.get(server_id).cloned().unwrap_or_default();
         let previous = handle.snapshot.clone();
-        let snapshot = match handle.connection.discover().await {
+        let snapshot = match Self::discover_with_options(&handle.connection, &options).await {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 self.emit_catalog_event(McpCatalogEvent::RefreshFailed {
@@ -2489,8 +2580,9 @@ impl McpServerManager {
                 .connections
                 .get_mut(&server_id)
                 .ok_or_else(|| McpError::UnknownServer(server_id.to_string()))?;
+            let options = self.options.get(&server_id).cloned().unwrap_or_default();
             let previous = handle.snapshot.clone();
-            let snapshot = match handle.connection.discover().await {
+            let snapshot = match Self::discover_with_options(&handle.connection, &options).await {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     let event = McpCatalogEvent::RefreshFailed {
@@ -3468,6 +3560,14 @@ pub enum McpError {
     /// A transport-level error.
     #[error("transport error: {0}")]
     Transport(String),
+    /// A manager lifecycle operation exceeded its configured timeout.
+    #[error("{operation} timed out after {duration:?}")]
+    Timeout {
+        /// Operation that timed out.
+        operation: &'static str,
+        /// Configured timeout duration.
+        duration: Duration,
+    },
     /// An MCP protocol violation.
     #[error("protocol error: {0}")]
     Protocol(String),
