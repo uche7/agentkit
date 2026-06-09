@@ -212,4 +212,3 @@ fn print_assistant_item(item: Item) {
         }
     }
 }
-

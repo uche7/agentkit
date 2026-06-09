@@ -161,6 +161,7 @@ The manager owns server lifecycle:
 | Method                                 | Purpose                                                                                                                                 |
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `connect_server(id)` / `connect_all()` | Open a connection and run discovery                                                                                                     |
+| `connect_all_settled()`                | Attempt all registered servers concurrently, install successes, and return per-server failures                                          |
 | `refresh_server(id)`                   | Re-run discovery and emit per-tool/resource/prompt diff events                                                                          |
 | `refresh_changed_catalogs()`           | Drain pending `*list_changed` notifications and refresh affected catalogs                                                               |
 | `disconnect_server(id)`                | Close the connection, drop tools from the federated catalog, emit `ServerDisconnected`                                                  |

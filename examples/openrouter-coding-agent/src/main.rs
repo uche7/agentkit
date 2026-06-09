@@ -817,7 +817,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-
 fn print_banner(model: &str, root: &Path, max_ctx: u64) {
     println!("openrouter-coding-agent  ({model})");
     println!("cwd: {}", root.display());

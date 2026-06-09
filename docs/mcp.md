@@ -149,6 +149,8 @@ let registry = manager.tool_registry();
 let provider = manager.capability_provider();
 ```
 
+For best-effort startup, `connect_all_settled().await` attempts every registered server concurrently, installs the successful connections, and returns per-server failures without short-circuiting on the first error.
+
 `McpConnection` is the live handle to one configured MCP server. It owns:
 
 - the rmcp `RunningService` (negotiated transport + session)

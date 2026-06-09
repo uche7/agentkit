@@ -18,6 +18,7 @@ use agentkit_integration_tests::snapshot::{
 use agentkit_loop::{Agent, LoopInterrupt, LoopStep, SessionConfig};
 use agentkit_mcp::{McpCatalogEvent, McpServerConfig, McpServerId, McpServerManager};
 use agentkit_tools_core::ToolSource;
+use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn connect_server_populates_catalog() {
@@ -101,6 +102,47 @@ async fn disconnect_server_isolates_per_server_tools() {
 
     let observed = adapter.into_recording(&recording, driver.snapshot().transcript.clone());
     assert_recording(&observed, &path);
+}
+
+#[tokio::test]
+async fn connect_all_settled_keeps_successes_and_reports_each_failure() {
+    let alpha = spawn_http_mcp(vec![simple_tool("only_alpha", "alpha-only tool.")]).await;
+    let beta = spawn_http_mcp(vec![simple_tool("only_beta", "beta-only tool.")]).await;
+    let bad_url = unused_local_mcp_url().await;
+
+    let mut manager = McpServerManager::new()
+        .with_server(McpServerConfig::streamable_http("alpha", &alpha.url))
+        .with_server(McpServerConfig::streamable_http("bad", bad_url))
+        .with_server(McpServerConfig::streamable_http("beta", &beta.url));
+    let source = manager.source();
+
+    let settled = manager.connect_all_settled().await;
+
+    assert_eq!(settled.connected().len(), 2);
+    assert_eq!(settled.failed().len(), 1);
+    assert!(settled.has_failures());
+    assert!(!settled.all_connected());
+    assert_eq!(settled.failed()[0].server_id, McpServerId::new("bad"));
+    assert!(
+        settled.failed()[0]
+            .error
+            .to_string()
+            .contains("transport error"),
+        "unexpected error: {}",
+        settled.failed()[0].error
+    );
+    assert!(
+        manager
+            .connected_server(&McpServerId::new("alpha"))
+            .is_some()
+    );
+    assert!(
+        manager
+            .connected_server(&McpServerId::new("beta"))
+            .is_some()
+    );
+    assert!(manager.connected_server(&McpServerId::new("bad")).is_none());
+    assert_tool_names(&source, &["mcp_alpha_only_alpha", "mcp_beta_only_beta"]);
 }
 
 #[tokio::test]
@@ -304,6 +346,18 @@ fn assert_tool_names(source: &impl ToolSource, expected: &[&str]) {
         .collect::<Vec<_>>();
     actual.sort();
     assert_eq!(actual, expected);
+}
+
+async fn unused_local_mcp_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind unused local port");
+    let port = listener
+        .local_addr()
+        .expect("listener has local_addr")
+        .port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}/mcp")
 }
 
 async fn drive_until_finished<S>(driver: &mut agentkit_loop::LoopDriver<S>)

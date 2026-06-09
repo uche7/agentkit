@@ -38,7 +38,7 @@ use agentkit_tools_core::{
     ToolResult, ToolSpec, dynamic_catalog,
 };
 use async_trait::async_trait;
-use futures_util::future::try_join_all;
+use futures_util::future::{join_all, try_join_all};
 use futures_util::stream::BoxStream;
 use http::{HeaderName, HeaderValue};
 use rmcp::ServiceExt;
@@ -2117,6 +2117,69 @@ impl McpServerHandle {
     }
 }
 
+/// Connection failure for one server returned by
+/// [`McpServerManager::connect_all_settled`].
+#[derive(Debug)]
+pub struct McpServerConnectionError {
+    /// The registered server that failed to connect or complete discovery.
+    pub server_id: McpServerId,
+    /// The underlying connection or discovery error for this server.
+    pub error: McpError,
+}
+
+/// Best-effort outcome returned by [`McpServerManager::connect_all_settled`].
+///
+/// Successful connections are installed into the manager and its tool catalog.
+/// Failed entries leave any existing connection for that server untouched.
+#[must_use = "inspect `failed` before ignoring the settled MCP connection result"]
+pub struct McpConnectAllSettled {
+    /// Handles for servers that connected and completed discovery.
+    pub connected: Vec<McpServerHandle>,
+    /// Per-server failures for servers that did not connect or discover.
+    pub failed: Vec<McpServerConnectionError>,
+}
+
+impl McpConnectAllSettled {
+    /// Returns `true` when every registered server connected successfully.
+    pub fn all_connected(&self) -> bool {
+        self.failed.is_empty()
+    }
+
+    /// Returns `true` when at least one server failed to connect.
+    pub fn has_failures(&self) -> bool {
+        !self.failed.is_empty()
+    }
+
+    /// Borrows the successful connection handles.
+    pub fn connected(&self) -> &[McpServerHandle] {
+        &self.connected
+    }
+
+    /// Borrows the per-server connection failures.
+    pub fn failed(&self) -> &[McpServerConnectionError] {
+        &self.failed
+    }
+
+    /// Consumes the result into successful handles and failures.
+    pub fn into_parts(self) -> (Vec<McpServerHandle>, Vec<McpServerConnectionError>) {
+        (self.connected, self.failed)
+    }
+}
+
+impl fmt::Debug for McpConnectAllSettled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let connected = self
+            .connected
+            .iter()
+            .map(|handle| handle.server_id())
+            .collect::<Vec<_>>();
+        f.debug_struct("McpConnectAllSettled")
+            .field("connected", &connected)
+            .field("failed", &self.failed)
+            .finish()
+    }
+}
+
 /// Manages the lifecycle of one or more MCP servers.
 pub struct McpServerManager {
     configs: BTreeMap<McpServerId, McpServerConfig>,
@@ -2302,6 +2365,75 @@ impl McpServerManager {
             self.emit_catalog_event(McpCatalogEvent::ServerConnected { server_id });
         }
         Ok(handles)
+    }
+
+    /// Connects all registered servers concurrently and waits for every
+    /// connection attempt to settle.
+    ///
+    /// Unlike [`Self::connect_all`], this method does not fail fast. Every
+    /// server is attempted in parallel; successful connections are installed
+    /// into the manager and tool catalog, while each failed connection is
+    /// returned with its [`McpServerId`] and [`McpError`].
+    pub async fn connect_all_settled(&mut self) -> McpConnectAllSettled {
+        let plans: Vec<(McpServerId, McpServerConfig, Option<MetadataMap>)> = self
+            .configs
+            .iter()
+            .map(|(id, cfg)| (id.clone(), cfg.clone(), self.auth.get(id).cloned()))
+            .collect();
+        let handler_config = self.handler_config.clone();
+        let namespace = self.namespace.clone();
+
+        let futures = plans.into_iter().map(|(server_id, config, auth)| {
+            let handler_config = handler_config.clone();
+            let namespace = namespace.clone();
+            async move {
+                let result = async {
+                    let connection = Arc::new(
+                        McpConnection::connect_with_auth(&config, auth.as_ref(), handler_config)
+                            .await?,
+                    );
+                    let snapshot = connection.discover().await?;
+                    Ok::<McpServerHandle, McpError>(McpServerHandle {
+                        config,
+                        connection,
+                        snapshot,
+                        namespace,
+                    })
+                }
+                .await;
+                (server_id, result)
+            }
+        });
+
+        let results = join_all(futures).await;
+        let mut connected = Vec::new();
+        let mut failures = Vec::new();
+        let mut connected_snapshots = Vec::new();
+
+        for (server_id, result) in results {
+            match result {
+                Ok(handle) => {
+                    connected_snapshots.push((server_id.clone(), handle.snapshot.clone()));
+                    self.connections.insert(server_id, handle.clone());
+                    connected.push(handle);
+                }
+                Err(error) => {
+                    failures.push(McpServerConnectionError { server_id, error });
+                }
+            }
+        }
+
+        for (server_id, snapshot) in &connected_snapshots {
+            self.register_server_tools(server_id, snapshot);
+        }
+        for (server_id, _) in connected_snapshots {
+            self.emit_catalog_event(McpCatalogEvent::ServerConnected { server_id });
+        }
+
+        McpConnectAllSettled {
+            connected,
+            failed: failures,
+        }
     }
 
     /// Re-discovers capabilities for a connected server.

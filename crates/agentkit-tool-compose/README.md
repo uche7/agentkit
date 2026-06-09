@@ -12,4 +12,3 @@ let registry = agentkit_tool_compose::registry();
 
 Compose is opt-in. Add this registry explicitly with
 `AgentBuilder::add_tool_source`.
-
