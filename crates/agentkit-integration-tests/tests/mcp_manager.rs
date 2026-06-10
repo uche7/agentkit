@@ -173,7 +173,7 @@ async fn connect_all_settled_times_out_slow_discovery_per_server() {
     assert!(matches!(
         settled.failed()[0].error,
         McpError::Timeout {
-            operation: "discover",
+            operation: "connect",
             ..
         }
     ));
@@ -185,6 +185,44 @@ async fn connect_all_settled_times_out_slow_discovery_per_server() {
     assert!(
         manager
             .connected_server(&McpServerId::new("slow"))
+            .is_none()
+    );
+    assert_tool_names(&source, &["mcp_fast_fast_tool"]);
+}
+
+#[tokio::test]
+async fn connect_all_settled_times_out_hung_initialize_per_server() {
+    let fast = spawn_http_mcp(vec![simple_tool("fast_tool", "Fast tool.")]).await;
+    let hung = spawn_http_mcp(vec![simple_tool("hung_tool", "Hung tool.")]).await;
+    hung.set_initialize_delay(Some(Duration::from_secs(60)));
+
+    let mut manager = McpServerManager::new()
+        .with_server(McpServerConfig::streamable_http("fast", &fast.url))
+        .with_server_options(
+            McpServerConfig::streamable_http("hung", &hung.url),
+            McpServerOptions::new().with_timeout(Duration::from_millis(25)),
+        );
+    let source = manager.source();
+
+    let settled = manager.connect_all_settled().await;
+
+    assert_eq!(settled.connected().len(), 1);
+    assert_eq!(
+        settled.connected()[0].server_id(),
+        &McpServerId::new("fast")
+    );
+    assert_eq!(settled.failed().len(), 1);
+    assert_eq!(settled.failed()[0].server_id, McpServerId::new("hung"));
+    assert!(matches!(
+        settled.failed()[0].error,
+        McpError::Timeout {
+            operation: "connect",
+            ..
+        }
+    ));
+    assert!(
+        manager
+            .connected_server(&McpServerId::new("hung"))
             .is_none()
     );
     assert_tool_names(&source, &["mcp_fast_fast_tool"]);

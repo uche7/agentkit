@@ -151,7 +151,7 @@ let provider = manager.capability_provider();
 
 For best-effort startup, `connect_all_settled().await` attempts every registered server concurrently, installs the successful connections, and returns per-server failures without short-circuiting on the first error.
 
-Discovery can be bounded per server with `with_server_options(config, McpServerOptions::new().with_timeout(duration))`. The timeout applies whenever the manager runs discovery (`connect_server`, `connect_all`, `connect_all_settled`, `refresh_server`, and changed-catalog refreshes), and timeouts surface as `McpError::Timeout`.
+Connecting can be bounded per server with `with_server_options(config, McpServerOptions::new().with_timeout(duration))`. On connect paths (`connect_server`, `connect_all`, `connect_all_settled`) the timeout covers connection establishment — transport setup and the MCP initialize handshake — together with initial discovery; on `refresh_server` and changed-catalog refreshes it bounds discovery alone. Timeouts surface as `McpError::Timeout`.
 
 `McpConnection` is the live handle to one configured MCP server. It owns:
 

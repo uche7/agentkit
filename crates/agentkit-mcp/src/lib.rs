@@ -2206,9 +2206,11 @@ impl fmt::Debug for McpConnectAllSettled {
 /// Per-server lifecycle options used by [`McpServerManager`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct McpServerOptions {
-    /// Maximum time allowed for initial or refresh discovery
-    /// (`tools/list`, `resources/list`, and `prompts/list`).
-    pub discovery_timeout: Option<Duration>,
+    /// Maximum time allowed to establish a server connection — transport
+    /// setup and the MCP initialize handshake — and complete initial
+    /// discovery (`tools/list`, `resources/list`, and `prompts/list`).
+    /// Refresh discovery is bounded by the same duration.
+    pub connect_timeout: Option<Duration>,
 }
 
 impl McpServerOptions {
@@ -2217,9 +2219,9 @@ impl McpServerOptions {
         Self::default()
     }
 
-    /// Sets the discovery timeout.
+    /// Sets the connect timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.discovery_timeout = Some(timeout);
+        self.connect_timeout = Some(timeout);
         self
     }
 }
@@ -2361,7 +2363,7 @@ impl McpServerManager {
         connection: &McpConnection,
         options: &McpServerOptions,
     ) -> Result<McpDiscoverySnapshot, McpError> {
-        match options.discovery_timeout {
+        match options.connect_timeout {
             Some(timeout) => tokio::time::timeout(timeout, connection.discover())
                 .await
                 .map_err(|_| McpError::Timeout {
@@ -2369,6 +2371,31 @@ impl McpServerManager {
                     duration: timeout,
                 })?,
             None => connection.discover().await,
+        }
+    }
+
+    async fn connect_and_discover(
+        config: &McpServerConfig,
+        auth: Option<&MetadataMap>,
+        handler_config: McpHandlerConfig,
+        options: &McpServerOptions,
+    ) -> Result<(Arc<McpConnection>, McpDiscoverySnapshot), McpError> {
+        let connect = async {
+            let connection =
+                Arc::new(McpConnection::connect_with_auth(config, auth, handler_config).await?);
+            let snapshot = connection.discover().await?;
+            Ok((connection, snapshot))
+        };
+        match options.connect_timeout {
+            Some(timeout) => {
+                tokio::time::timeout(timeout, connect)
+                    .await
+                    .map_err(|_| McpError::Timeout {
+                        operation: "connect",
+                        duration: timeout,
+                    })?
+            }
+            None => connect.await,
         }
     }
 
@@ -2383,15 +2410,13 @@ impl McpServerManager {
             .cloned()
             .ok_or_else(|| McpError::UnknownServer(server_id.to_string()))?;
         let options = self.options.get(server_id).cloned().unwrap_or_default();
-        let connection = Arc::new(
-            McpConnection::connect_with_auth(
-                &config,
-                self.auth.get(server_id),
-                self.handler_config.clone(),
-            )
-            .await?,
-        );
-        let snapshot = Self::discover_with_options(&connection, &options).await?;
+        let (connection, snapshot) = Self::connect_and_discover(
+            &config,
+            self.auth.get(server_id),
+            self.handler_config.clone(),
+            &options,
+        )
+        .await?;
         let handle = McpServerHandle {
             config,
             connection,
@@ -2432,11 +2457,9 @@ impl McpServerManager {
             let handler_config = handler_config.clone();
             let namespace = namespace.clone();
             async move {
-                let connection = Arc::new(
-                    McpConnection::connect_with_auth(&config, auth.as_ref(), handler_config)
-                        .await?,
-                );
-                let snapshot = Self::discover_with_options(&connection, &options).await?;
+                let (connection, snapshot) =
+                    Self::connect_and_discover(&config, auth.as_ref(), handler_config, &options)
+                        .await?;
                 Ok::<(McpServerId, McpServerHandle), McpError>((
                     server_id,
                     McpServerHandle {
@@ -2500,11 +2523,13 @@ impl McpServerManager {
             let namespace = namespace.clone();
             async move {
                 let result = async {
-                    let connection = Arc::new(
-                        McpConnection::connect_with_auth(&config, auth.as_ref(), handler_config)
-                            .await?,
-                    );
-                    let snapshot = Self::discover_with_options(&connection, &options).await?;
+                    let (connection, snapshot) = Self::connect_and_discover(
+                        &config,
+                        auth.as_ref(),
+                        handler_config,
+                        &options,
+                    )
+                    .await?;
                     Ok::<McpServerHandle, McpError>(McpServerHandle {
                         config,
                         connection,

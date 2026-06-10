@@ -167,7 +167,7 @@ The manager owns server lifecycle:
 | `disconnect_server(id)`                | Close the connection, drop tools from the federated catalog, emit `ServerDisconnected`                                                  |
 | `subscribe_catalog_events()`           | Broadcast receiver for `McpCatalogEvent` (server connect / disconnect / tool added / removed / changed / refresh failed / auth changed) |
 
-Register a server with `with_server_options(config, McpServerOptions::new().with_timeout(duration))` to bound discovery for that server. The timeout applies to initial discovery and refresh discovery, and failures surface as `McpError::Timeout`.
+Register a server with `with_server_options(config, McpServerOptions::new().with_timeout(duration))` to bound connecting to that server. The timeout covers connection establishment — transport setup and the MCP initialize handshake — plus initial discovery, and applies to refresh discovery on its own; failures surface as `McpError::Timeout`.
 
 ## Federating MCP into the agent
 

@@ -13,8 +13,9 @@ use std::time::Duration;
 use rmcp::{
     RoleServer, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, Content, ErrorData as RmcpError, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool, ToolsCapability,
+        CallToolRequestParams, CallToolResult, Content, ErrorData as RmcpError,
+        InitializeRequestParams, InitializeResult, ListToolsResult, PaginatedRequestParams,
+        ServerCapabilities, ServerInfo, Tool, ToolsCapability,
     },
     service::{NotificationContext, Peer, RequestContext},
     transport::streamable_http_server::{
@@ -28,6 +29,7 @@ use tokio::{sync::oneshot, task::JoinHandle};
 #[derive(Clone)]
 pub struct MutableMcpServer {
     tools: Arc<Mutex<Vec<Tool>>>,
+    initialize_delay: Arc<Mutex<Option<Duration>>>,
     list_tools_delay: Arc<Mutex<Option<Duration>>>,
     peer_slot: Arc<Mutex<Option<Peer<RoleServer>>>>,
     /// Records every `call_tool` invocation as `(name, json_arguments)`.
@@ -38,6 +40,7 @@ impl MutableMcpServer {
     fn new(initial_tools: Vec<Tool>) -> Self {
         Self {
             tools: Arc::new(Mutex::new(initial_tools)),
+            initialize_delay: Arc::new(Mutex::new(None)),
             list_tools_delay: Arc::new(Mutex::new(None)),
             peer_slot: Arc::new(Mutex::new(None)),
             call_log: Arc::new(Mutex::new(Vec::new())),
@@ -54,6 +57,21 @@ impl ServerHandler for MutableMcpServer {
                 })
                 .build(),
         )
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, RmcpError> {
+        let delay = *self.initialize_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+        Ok(self.get_info())
     }
 
     async fn list_tools(
@@ -131,6 +149,13 @@ impl HttpServerHandle {
     /// client to learn about the change.
     pub fn set_tools(&self, tools: Vec<Tool>) {
         *self.server.tools.lock().unwrap() = tools;
+    }
+
+    /// Delays every `initialize` response by `delay`. Useful for exercising
+    /// client-side connect timeout behavior against a server that accepts
+    /// the transport but stalls the MCP handshake.
+    pub fn set_initialize_delay(&self, delay: Option<Duration>) {
+        *self.server.initialize_delay.lock().unwrap() = delay;
     }
 
     /// Delays every `tools/list` response by `delay`. Useful for exercising
