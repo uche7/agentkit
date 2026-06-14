@@ -120,6 +120,15 @@ fn message_to_parts(message: &ResponseMessage) -> Result<Vec<Part>, CompletionsE
         parts.extend(content_to_parts(content)?);
     }
 
+    for image in &message.images {
+        parts.push(Part::Media(MediaPart {
+            modality: Modality::Image,
+            mime_type: "image/*".into(),
+            data: DataRef::Uri(image.image_url.url.clone()),
+            metadata: MetadataMap::new(),
+        }));
+    }
+
     for tool_call in &message.tool_calls {
         parts.push(Part::ToolCall(ToolCallPart {
             id: tool_call.id.clone().into(),
@@ -259,6 +268,21 @@ pub(crate) struct ResponseMessage {
     pub reasoning: Option<String>,
     pub reasoning_details: Option<Value>,
     pub refusal: Option<String>,
+    /// De facto convention across OpenAI-compatible gateways for returning
+    /// generated images from image-output models routed via chat completions —
+    /// the OpenAI spec never specified where output images should live, so
+    /// gateways converged on a top-level `images` array on the message,
+    /// alongside `content`/`tool_calls`.
+    ///
+    /// Observed in production at:
+    ///   - OpenRouter (Google Nano Banana family, others)
+    ///   - Vercel AI Gateway (Nano Banana, Nano Banana Pro, GPT-5 image variants)
+    ///   - llmgateway.io
+    ///
+    /// Each entry mirrors the OpenAI `image_url` part shape — `image_url.url`
+    /// typically a `data:image/...;base64,...` URL.
+    #[serde(default)]
+    pub images: Vec<ResponseImage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,6 +304,13 @@ pub(crate) struct ResponseContentPart {
 #[derive(Debug, Deserialize, serde::Serialize)]
 pub(crate) struct ResponseImageUrl {
     pub url: String,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize)]
+pub(crate) struct ResponseImage {
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub image_url: ResponseImageUrl,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize)]
