@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use agentkit_core::{MetadataMap, ToolCallId, ToolOutput, ToolResultPart, TurnCancellation};
 use agentkit_tools_core::{
-    ApprovalRequest, PermissionCode, PermissionDenial, Tool, ToolAnnotations, ToolContext,
-    ToolError, ToolExecutionOutcome, ToolExecutionScope, ToolInterruption, ToolName, ToolRegistry,
-    ToolRequest, ToolResult, ToolSource, ToolSpec,
+    ApprovalRequest, PermissionCode, PermissionDenial, Tool, ToolAnnotations, ToolCatalogEvent,
+    ToolContext, ToolError, ToolExecutionOutcome, ToolExecutionScope, ToolInterruption, ToolName,
+    ToolRegistry, ToolRequest, ToolResult, ToolSource, ToolSpec,
 };
 use async_trait::async_trait;
 use mlua::{HookTriggers, Lua, LuaSerdeExt, Value as LuaValue, VmState};
@@ -116,24 +116,24 @@ pub struct ComposeTool {
     spec: ToolSpec,
     config: ComposeConfig,
     states: Arc<Mutex<BTreeMap<ToolCallId, ComposeRunState>>>,
-    wrapped: Option<ToolRegistry>,
-    catalog_snapshot: Option<Vec<ToolSpec>>,
+    sources: Vec<Arc<dyn ToolSource>>,
 }
 
 impl ComposeTool {
-    /// Builds a compose tool with no catalog snapshot. The tool description
+    /// Builds a compose tool with no child catalog source. The tool description
     /// stays generic; the model has to use `tools()` at runtime to discover
     /// what's available. Prefer [`wrap`](Self::wrap) when possible — the
     /// model writes correct scripts on the first try when it sees concrete
     /// input/output schemas at planning time.
     pub fn new(config: ComposeConfig) -> Self {
-        Self::build(config, None, None)
+        Self::build(config, Vec::new())
     }
 
-    /// Wraps a registry of child tools. The resulting [`ToolSource`] still
+    /// Wraps a source of child tools. The resulting [`ToolSource`] still
     /// advertises every child tool individually to the model AND adds the
-    /// `compose` entry whose description enumerates each child's
-    /// input/output schemas.
+    /// `compose` entry whose description enumerates each child's output schema.
+    /// Child tool lookups and catalog events continue to delegate to the live
+    /// source, so dynamic catalogs stay reactive.
     ///
     /// ```rust
     /// use agentkit_core::{ToolOutput, ToolResultPart};
@@ -164,54 +164,78 @@ impl ComposeTool {
     /// assert!(names.iter().any(|n| n == "compose"));
     /// assert!(names.iter().any(|n| n == "echo"));
     /// ```
-    pub fn wrap(registry: impl Into<ToolRegistry>) -> Self {
-        let registry = registry.into();
-        let snapshot = registry.specs();
-        Self::build(ComposeConfig::default(), Some(snapshot), Some(registry))
+    pub fn wrap(source: impl ToolSource + 'static) -> Self {
+        Self::new(ComposeConfig::default()).with_source(source)
+    }
+
+    /// Adds another child source to this compose source.
+    pub fn with_source(mut self, source: impl ToolSource + 'static) -> Self {
+        self.sources.push(Arc::new(source));
+        self.spec = self.compose_spec();
+        self
     }
 
     /// Replaces the configuration and rebuilds the compose tool description so
     /// it reflects the new permission filter.
     pub fn with_config(self, config: ComposeConfig) -> Self {
-        Self::build(config, self.catalog_snapshot, self.wrapped)
+        Self::build(config, self.sources)
     }
 
-    fn build(
-        config: ComposeConfig,
-        catalog_snapshot: Option<Vec<ToolSpec>>,
-        wrapped: Option<ToolRegistry>,
-    ) -> Self {
-        let filtered: Option<Vec<ToolSpec>> = catalog_snapshot.as_ref().map(|snap| {
+    fn build(config: ComposeConfig, sources: Vec<Arc<dyn ToolSource>>) -> Self {
+        let mut tool = Self {
+            spec: Self::base_spec(&config, None),
+            config,
+            states: Arc::new(Mutex::new(BTreeMap::new())),
+            sources,
+        };
+        tool.spec = tool.compose_spec();
+        tool
+    }
+
+    fn base_spec(config: &ComposeConfig, catalog: Option<&[ToolSpec]>) -> ToolSpec {
+        let filtered: Option<Vec<ToolSpec>> = catalog.map(|snap| {
             snap.iter()
                 .filter(|spec| config.allows(&spec.name))
                 .cloned()
                 .collect()
         });
-        Self {
-            spec: ToolSpec::new(
-                COMPOSE_TOOL_NAME,
-                Self::compose_description(filtered.as_deref()),
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "script": {
-                            "type": "string",
-                            "description": "Lua script to execute. Return a value to make it the compose result."
-                        },
-                        "input": {
-                            "description": "Optional JSON value exposed to Lua as global input."
-                        }
+        ToolSpec::new(
+            COMPOSE_TOOL_NAME,
+            Self::compose_description(filtered.as_deref()),
+            json!({
+                "type": "object",
+                "properties": {
+                    "script": {
+                        "type": "string",
+                        "description": "Lua script to execute. Return a value to make it the compose result."
                     },
-                    "required": ["script"],
-                    "additionalProperties": false
-                }),
-            )
-            .with_annotations(ToolAnnotations::new()),
-            config,
-            states: Arc::new(Mutex::new(BTreeMap::new())),
-            wrapped,
-            catalog_snapshot,
+                    "input": {
+                        "description": "Optional JSON value exposed to Lua as global input."
+                    }
+                },
+                "required": ["script"],
+                "additionalProperties": false
+            }),
+        )
+        .with_annotations(ToolAnnotations::new())
+    }
+
+    fn compose_spec(&self) -> ToolSpec {
+        let catalog = self.child_specs();
+        Self::base_spec(&self.config, Some(&catalog))
+    }
+
+    fn child_specs(&self) -> Vec<ToolSpec> {
+        let mut seen = BTreeSet::new();
+        let mut specs = Vec::new();
+        for source in &self.sources {
+            for spec in source.specs() {
+                if seen.insert(spec.name.clone()) {
+                    specs.push(spec);
+                }
+            }
         }
+        specs
     }
 
     fn compose_description(catalog: Option<&[ToolSpec]>) -> String {
@@ -273,10 +297,15 @@ impl ComposeTool {
 
 impl ToolSource for ComposeTool {
     fn specs(&self) -> Vec<ToolSpec> {
+        let mut seen = BTreeSet::new();
         let mut specs = Vec::new();
-        specs.push(self.spec.clone());
-        if let Some(reg) = &self.wrapped {
-            specs.extend(reg.specs());
+        let compose_spec = self.compose_spec();
+        seen.insert(compose_spec.name.clone());
+        specs.push(compose_spec);
+        for spec in self.child_specs() {
+            if seen.insert(spec.name.clone()) {
+                specs.push(spec);
+            }
         }
         specs
     }
@@ -285,7 +314,21 @@ impl ToolSource for ComposeTool {
         if name.0.as_str() == COMPOSE_TOOL_NAME {
             return Some(Arc::new(self.clone()));
         }
-        self.wrapped.as_ref().and_then(|reg| reg.get(name))
+        self.sources.iter().find_map(|source| source.get(name))
+    }
+
+    fn drain_catalog_events(&self) -> Vec<ToolCatalogEvent> {
+        let mut events: Vec<ToolCatalogEvent> = self
+            .sources
+            .iter()
+            .flat_map(|source| source.drain_catalog_events())
+            .collect();
+        if !events.is_empty() {
+            let mut event = ToolCatalogEvent::new(COMPOSE_TOOL_NAME);
+            event.changed.push(COMPOSE_TOOL_NAME.into());
+            events.push(event);
+        }
+        events
     }
 }
 
@@ -343,6 +386,10 @@ impl Error for ComposeFailure {}
 impl Tool for ComposeTool {
     fn spec(&self) -> &ToolSpec {
         &self.spec
+    }
+
+    fn current_spec(&self) -> Option<ToolSpec> {
+        Some(self.compose_spec())
     }
 
     async fn invoke(

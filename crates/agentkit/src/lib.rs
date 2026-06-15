@@ -297,7 +297,9 @@ pub use agentkit_tool_fs as tool_fs;
 /// Lua tool composition tool (`compose`).
 ///
 /// Call [`tool_compose::registry()`] to get a [`tools::ToolRegistry`]
-/// containing the Compose tool. Compose runs sandboxed Lua scripts that can
+/// containing the standalone Compose tool, or [`tool_compose::ComposeTool::wrap`]
+/// to wrap an existing [`tools::ToolSource`] so compose can render child output
+/// schemas into its own description. Compose runs sandboxed Lua scripts that can
 /// call the current tool catalog through a synchronous-looking `tool(...)`
 /// helper.
 ///

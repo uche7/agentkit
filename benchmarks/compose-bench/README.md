@@ -20,11 +20,11 @@ the `bash` arm's numbers.
 
 ### Arms
 
-| arm        | tool surface                                                                                           |
-| ---------- | ------------------------------------------------------------------------------------------------------ |
-| `granular` | scenario tools only                                                                                    |
-| `compose`  | the same tools wrapped by `ComposeTool::wrap` — compose **and** the granular tools are both advertised |
-| `bash`     | `shell_exec` only (file-backed scenario only)                                                          |
+| arm        | tool surface                                                                                                 |
+| ---------- | ------------------------------------------------------------------------------------------------------------ |
+| `granular` | scenario tools only                                                                                          |
+| `compose`  | the same tool source wrapped by `ComposeTool::wrap` — compose **and** the granular tools are both advertised |
+| `bash`     | `shell_exec` only (file-backed scenario only)                                                                |
 
 The system prompt is identical in every arm and deliberately neutral ("be
 efficient"), never mentioning compose. In the `compose` arm the model is free

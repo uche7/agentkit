@@ -73,9 +73,11 @@ tool (`crates/agentkit-tool-compose`) closes the gap: the model submits a Lua
 5.4 script which runs sandboxed (no `io`/`os`/`require`/`load`, instruction
 limits, nested-call budget) and may invoke any visible tool synchronously via
 `tool(name, input)`. The script's return value — and only that — enters the
-transcript. `ComposeTool::wrap(registry)` additionally snapshots every child
-tool's `output_schema` into the compose description, so the model knows the
-exact shape `tool(...)` will return without a discovery call.
+transcript. `ComposeTool::wrap(source)` additionally renders every child tool's
+`output_schema` into the compose description, so the model knows the exact
+shape `tool(...)` will return without a discovery call. Because `wrap` accepts
+any `ToolSource`, dynamic catalogs such as MCP remain live: child lookups and
+catalog-change events delegate to the wrapped source.
 
 ### 1.3 Thesis
 
@@ -124,11 +126,11 @@ script the model writes — are persisted per run.
 
 ### 2.2 Arms
 
-| arm        | tool surface                                                                                                       |
-| ---------- | ------------------------------------------------------------------------------------------------------------------ |
-| `granular` | scenario tools only                                                                                                |
-| `compose`  | the same registry wrapped by `ComposeTool::wrap` — compose **and** every granular tool remain individually visible |
-| `bash`     | `shell_exec` only; file-backed scenario only                                                                       |
+| arm        | tool surface                                                                                                          |
+| ---------- | --------------------------------------------------------------------------------------------------------------------- |
+| `granular` | scenario tools only                                                                                                   |
+| `compose`  | the same tool source wrapped by `ComposeTool::wrap` — compose **and** every granular tool remain individually visible |
+| `bash`     | `shell_exec` only; file-backed scenario only                                                                          |
 
 Two design decisions matter for validity:
 

@@ -12,3 +12,13 @@ let registry = agentkit_tool_compose::registry();
 
 Compose is opt-in. Add this registry explicitly with
 `AgentBuilder::add_tool_source`.
+
+For a richer tool description, wrap an existing tool source:
+
+```rust
+let tools = agentkit_tool_compose::ComposeTool::wrap(child_source);
+```
+
+The wrapped source still advertises and executes its child tools directly, while
+`compose` renders child output schemas into its own description. Dynamic sources
+remain live: catalog events and child lookups delegate to the wrapped source.

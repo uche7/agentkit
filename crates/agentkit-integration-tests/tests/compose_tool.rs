@@ -7,11 +7,13 @@ use agentkit_integration_tests::mock_tool::RecordingTool;
 use agentkit_loop::{Agent, LoopInterrupt, LoopStep, SessionConfig};
 use agentkit_tools_core::{
     ApprovalReason, ApprovalRequest, PermissionChecker, PermissionDecision, PermissionRequest,
-    Tool, ToolContext, ToolError, ToolRequest, ToolResult, ToolSpec,
+    Tool, ToolContext, ToolError, ToolName, ToolRequest, ToolResult, ToolSource, ToolSpec,
+    dynamic_catalog,
 };
 use async_trait::async_trait;
 use serde_json::json;
 use std::any::Any;
+use std::sync::Arc;
 
 fn compose_call(script: &str) -> ToolCallPart {
     ToolCallPart::new(
@@ -274,6 +276,62 @@ async fn compose_tools_listing_excludes_compose_and_lists_children() {
         ToolOutput::structured(json!(["echo", "reverse"])),
         "tools() should expose every child tool and exclude compose itself",
     );
+}
+
+#[tokio::test]
+async fn compose_source_tracks_dynamic_child_catalog() {
+    let (writer, reader) = dynamic_catalog("dynamic");
+    let alpha = RecordingTool::new(
+        ToolSpec::new("alpha", "alpha input", json!({"type": "object"})).with_output_schema(
+            json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "integer" }
+                }
+            }),
+        ),
+        |request| Ok(ToolOutput::structured(request.input.clone())),
+    );
+    writer.upsert(Arc::new(alpha));
+    let _ = reader.drain_catalog_events();
+
+    let tools = agentkit_tool_compose::ComposeTool::wrap(reader);
+
+    let specs = tools.specs();
+    assert!(specs.iter().any(|spec| spec.name.0 == "compose"));
+    assert!(specs.iter().any(|spec| spec.name.0 == "alpha"));
+    let compose_spec = specs
+        .iter()
+        .find(|spec| spec.name.0 == "compose")
+        .expect("compose spec");
+    assert!(compose_spec.description.contains("alpha"));
+    assert!(compose_spec.description.contains("\"value\""));
+    assert!(tools.get(&ToolName::new("alpha")).is_some());
+
+    assert!(writer.remove(&ToolName::new("alpha")));
+
+    let events = tools.drain_catalog_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.removed.iter().any(|name| name == "alpha")),
+        "dynamic child removal must be forwarded: {events:?}",
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.changed.iter().any(|name| name == "compose")),
+        "compose spec must be marked changed when child catalog changes: {events:?}",
+    );
+
+    let specs = tools.specs();
+    assert!(!specs.iter().any(|spec| spec.name.0 == "alpha"));
+    let compose_spec = specs
+        .iter()
+        .find(|spec| spec.name.0 == "compose")
+        .expect("compose spec");
+    assert!(!compose_spec.description.contains("alpha"));
+    assert!(tools.get(&ToolName::new("alpha")).is_none());
 }
 
 #[tokio::test]

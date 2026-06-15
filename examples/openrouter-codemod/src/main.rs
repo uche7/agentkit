@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let model_name = config.model.clone();
     let adapter = OpenRouterAdapter::new(config)?;
 
-    // ComposeTool::wrap snapshots each child tool's output schema into the compose
+    // ComposeTool::wrap renders each child tool's output schema into the compose
     // tool description, so the model sees the exact return shape of every tool it
     // might call from Lua. Wrapped tools are exposed individually.
     let tool_source = agentkit_tool_compose::ComposeTool::wrap(
