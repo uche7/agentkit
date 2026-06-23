@@ -1871,6 +1871,7 @@ where
             gen_ai.provider.name = tracing::field::Empty,
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cost = tracing::field::Empty,
             session.id = %self.session_id,
             turn.id = %turn_id,
             transcript.len = self.transcript.len(),
@@ -1971,6 +1972,7 @@ where
             "gen_ai.response.finish_reasons" = tracing::field::Empty,
             "gen_ai.usage.input_tokens" = tracing::field::Empty,
             "gen_ai.usage.output_tokens" = tracing::field::Empty,
+            "gen_ai.usage.cost" = tracing::field::Empty,
         );
         if let Some(provider) = &self.provider_name {
             chat_span.record("gen_ai.provider.name", provider.as_str());
@@ -2036,6 +2038,9 @@ where
                         chat_span.record("gen_ai.usage.input_tokens", tokens.input_tokens);
                         chat_span.record("gen_ai.usage.output_tokens", tokens.output_tokens);
                     }
+                    if let Some(cost) = &usage.cost {
+                        chat_span.record("gen_ai.usage.cost", cost.amount);
+                    }
                     self.emit(AgentEvent::UsageUpdated(usage));
                 }
                 ModelTurnEvent::ToolCall(call) => {
@@ -2066,6 +2071,9 @@ where
             chat_span.record("gen_ai.usage.input_tokens", tokens.input_tokens);
             chat_span.record("gen_ai.usage.output_tokens", tokens.output_tokens);
         }
+        if let Some(cost) = result.usage.as_ref().and_then(|usage| usage.cost.as_ref()) {
+            chat_span.record("gen_ai.usage.cost", cost.amount);
+        }
         chat_span.record(
             "gen_ai.response.finish_reasons",
             tracing::field::debug(&result.finish_reason),
@@ -2083,6 +2091,9 @@ where
         {
             tracing::Span::current().record("gen_ai.usage.input_tokens", tokens.input_tokens);
             tracing::Span::current().record("gen_ai.usage.output_tokens", tokens.output_tokens);
+        }
+        if let Some(cost) = result.usage.as_ref().and_then(|usage| usage.cost.as_ref()) {
+            tracing::Span::current().record("gen_ai.usage.cost", cost.amount);
         }
         let now = Timestamp::now();
         let usage = result.usage.clone();
